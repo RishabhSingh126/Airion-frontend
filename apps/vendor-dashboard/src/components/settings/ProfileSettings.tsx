@@ -126,7 +126,12 @@ const ProfileSettings: React.FC = () => {
         painPoints: v.painPoints || [],
         categoryId: v.categoryId || '',
         subcategoryId: v.subcategoryId || '',
-        portfolioImages: (v.portfolioImages && v.portfolioImages.length > 0) ? v.portfolioImages : [],
+        portfolioImages: ((v.portfolioImages && v.portfolioImages.length > 0) ? v.portfolioImages : []).map((img: string) => {
+          if (img && (img.startsWith('http://localhost:') || img.startsWith('http://127.0.0.1:'))) {
+            return img.replace(/^http:\/\/(localhost|127\.0\.0\.1):\d+/, 'https://airion-api.onrender.com');
+          }
+          return img;
+        }),
       });
     }
   }, [user]);
@@ -431,12 +436,42 @@ const ProfileSettings: React.FC = () => {
         <div className="space-y-3">
           <label className="text-[11px] sm:text-sm font-bold text-[var(--ease2event-text-secondary)] tracking-widest ml-1">Portfolio Highlights</label>
           <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-4 sm:gap-6 bg-[var(--ease2event-bg-elevated)]/20 p-4 sm:p-6 rounded-xl sm:rounded-xl md:rounded-[32px] border border-[var(--ease2event-border-subtle)]">
-            {businessData.portfolioImages.map((img, i) => (
-              <div key={i} className="aspect-square rounded-xl sm:rounded-2xl overflow-hidden bg-[var(--ease2event-bg-surface)] border border-[var(--ease2event-border-base)] relative group transition-all active:scale-95">
-                <img src={img} className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity" />
-                <button onClick={() => setBusinessData(p => ({ ...p, portfolioImages: p.portfolioImages.filter((_, idx) => idx !== i) }))} className="absolute inset-0 bg-rose-600/90 text-white opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity cursor-pointer"><Trash2 size={16} /></button>
-              </div>
-            ))}
+            {businessData.portfolioImages.map((img, i) => {
+              const displaySrc = img && (img.startsWith('http://localhost:') || img.startsWith('http://127.0.0.1:'))
+                ? img.replace(/^http:\/\/(localhost|127\.0\.0\.1):\d+/, 'https://airion-api.onrender.com')
+                : img;
+
+              return (
+                <div key={i} className="aspect-square rounded-xl sm:rounded-2xl overflow-hidden bg-[var(--ease2event-bg-surface)] border border-[var(--ease2event-border-base)] relative group transition-all active:scale-95 shadow-sm">
+                  <img
+                    src={displaySrc}
+                    alt={`Portfolio highlight ${i + 1}`}
+                    className="w-full h-full object-cover opacity-90 group-hover:opacity-100 transition-opacity"
+                    onError={(e) => {
+                      (e.currentTarget as HTMLImageElement).style.opacity = '0.3';
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const updated = businessData.portfolioImages.filter((_, idx) => idx !== i);
+                      setBusinessData(p => ({ ...p, portfolioImages: updated }));
+                      try {
+                        await api.put('/vendors/me', { portfolioImages: updated });
+                        refreshUser();
+                        toast.success('Image removed from portfolio');
+                      } catch (err) {
+                        console.warn('Failed to auto-save image removal:', err);
+                      }
+                    }}
+                    className="absolute inset-0 bg-rose-600/90 text-white opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity cursor-pointer"
+                    title="Remove image"
+                  >
+                    <Trash2 size={20} />
+                  </button>
+                </div>
+              );
+            })}
             <label className="aspect-square rounded-xl sm:rounded-2xl border-2 border-dashed border-[var(--ease2event-border-base)] flex flex-col items-center justify-center text-[var(--ease2event-text-muted)] hover:text-[var(--ease2event-brand-primary)] hover:bg-[var(--ease2event-brand-primary)]/5 transition-all gap-2 sm:gap-3 group cursor-pointer">
               <input
                 type="file"
@@ -445,16 +480,76 @@ const ProfileSettings: React.FC = () => {
                 onChange={async (e) => {
                   const file = e.target.files?.[0];
                   if (!file) return;
-                  const loaderId = toast.loading('Uploading image...');
+
+                  // 1. Instant local preview
+                  const rawDataUrl = await new Promise<string>((resolve) => {
+                    const reader = new FileReader();
+                    reader.onload = () => resolve((reader.result as string) || '');
+                    reader.onerror = () => resolve('');
+                    reader.readAsDataURL(file);
+                  });
+
+                  const loaderId = toast.loading('Uploading and saving portfolio image...');
                   try {
-                    const data = await uploadImage(file);
-                    const imageUrl = data.url || data.data?.url || (typeof data === 'string' ? data : null);
-                    if (imageUrl) {
-                      setBusinessData(prev => ({ ...prev, portfolioImages: [...prev.portfolioImages, imageUrl] }));
-                      toast.success('Image uploaded successfully', { id: loaderId });
+                    // 2. Client-side canvas resize (max 800x800 JPEG @ 0.85, ~50-80KB) for 100% database persistence
+                    let optimizedDataUrl = rawDataUrl;
+                    try {
+                      const img = new Image();
+                      optimizedDataUrl = await new Promise<string>((resolve) => {
+                        img.onload = () => {
+                          const canvas = document.createElement('canvas');
+                          const maxDim = 800;
+                          let { width, height } = img;
+                          if (width > height && width > maxDim) {
+                            height = Math.round((height * maxDim) / width);
+                            width = maxDim;
+                          } else if (height > maxDim) {
+                            width = Math.round((width * maxDim) / height);
+                            height = maxDim;
+                          }
+                          canvas.width = width;
+                          canvas.height = height;
+                          const ctx = canvas.getContext('2d');
+                          if (ctx) {
+                            ctx.drawImage(img, 0, 0, width, height);
+                            resolve(canvas.toDataURL('image/jpeg', 0.85));
+                          } else {
+                            resolve(rawDataUrl);
+                          }
+                        };
+                        img.onerror = () => resolve(rawDataUrl);
+                        img.src = rawDataUrl;
+                      });
+                    } catch (e) {
+                      console.warn('Canvas optimization fallback:', e);
                     }
-                  } catch (err) {
-                    toast.error('Upload failed', { id: loaderId });
+
+                    // 3. Upload to server
+                    let remoteUrl: string | null = null;
+                    try {
+                      const data = await uploadImage(file);
+                      remoteUrl = data.url || data.data?.url || (typeof data === 'string' ? data : null);
+                      if (remoteUrl && remoteUrl.startsWith('http://localhost:')) {
+                        remoteUrl = remoteUrl.replace(/^http:\/\/localhost:\d+/, 'https://airion-api.onrender.com');
+                      }
+                    } catch (uploadErr) {
+                      console.warn('Cloud upload failed, using persistent data URL:', uploadErr);
+                    }
+
+                    const finalImageUrl = remoteUrl || optimizedDataUrl;
+
+                    if (finalImageUrl) {
+                      const updatedImages = [...businessData.portfolioImages, finalImageUrl];
+                      setBusinessData(prev => ({ ...prev, portfolioImages: updatedImages }));
+                      
+                      // Auto-save immediately to database so refresh NEVER loses it!
+                      await api.put('/vendors/me', { portfolioImages: updatedImages });
+                      refreshUser();
+                      toast.success('Image saved to portfolio!', { id: loaderId });
+                    }
+                  } catch (err: any) {
+                    console.error('[Portfolio Upload Error]:', err);
+                    toast.error('Failed to save image', { id: loaderId });
                   } finally {
                     e.target.value = '';
                   }
